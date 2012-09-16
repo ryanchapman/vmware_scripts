@@ -240,7 +240,7 @@ Function Get-HardDiskDetails
         [System.Array]
         ${VM},
 
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory=$false)]
         [System.Array]
         ${HardDisk}
     )
@@ -250,7 +250,7 @@ Function Get-HardDiskDetails
         Throw "You must specify -VM when specifying -HardDisk"
     } 
 
-    if($VM -eq $null)
+    if($VM -ne $null)
     {
         $vms = Get-VM -Name $VM
     } else {
@@ -265,10 +265,13 @@ Function Get-HardDiskDetails
         } else {
             $hardDisks = $vm | Get-HardDisk -Name $HardDisk
         }
-        $hardDisks | Format-Table @{N="CapacityKB";E={};A="Left"},
-                                  @{N="";E={};A=""}
+        $hardDisks | Format-Table @{N="CapacityKB";E={($_.CapacityKB)};A="Left"},
+                                  @{N="Persistence";E={$_.ExtensionData.Backing.DiskMode};A="Left"},
+                                  @{N="Thin";E={if($_.ExtensionData.Backing.ThinProvisioned){"Thin"}else{"Thick"}};A="Left"},
+                                  @{N="EagerZeroed";E={$_.ExtensionData.Backing.EagerlyScrub};A="Left"},
+                                  @{N="Virtual Device Node";E={$hdd=$_; $busNumber=(($vm|Get-View).Config.Hardware.Device | ?{$_.Key -eq $hdd.ExtensionData.ControllerKey}).BusNumber; "SCSI(" + $busNumber + ":" + $hdd.ExtensionData.UnitNumber + ") " + $hdd.Name};A="Left"},
+                                  @{N="Filename";E={$_.ExtensionData.Backing.FileName};A="Right"} `
+                                  -AutoSize
     }
-
-
 
 }
