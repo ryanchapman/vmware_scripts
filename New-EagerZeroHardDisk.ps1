@@ -14,7 +14,7 @@ Function New-EagerZeroHardDisk {
   Specify the datastore where you want to place the new hard disk.
   For example: New-EagerZeroHardDisk ... -Datastore (Get-Datastore 'datastore0')
 .PARAMETER CapacityKB
-  Specify the capacity of the new virtual disk (in KB).
+  Specify the capacity of the new virtual disk (in KB).  Must be at least 1024.
 .PARAMETER Controller
   Specify a SCSI controller to which you want to attach the new hard disk.
   Note that you can only have one SCSI controller per virtual machine.  If
@@ -25,7 +25,7 @@ Function New-EagerZeroHardDisk {
    VirtualBusLogicController
    VirtualLsiLogicController (default)
    VirtualLsiLogicSASController
-  For example: New-EagerZeroHardDisk ... -Controller (New-Object VMware.Vim.LsiLogicController)
+  For example: New-EagerZeroHardDisk ... -Controller (New-Object VMware.Vim.ParaVirtualSCSIController)
 .PARAMETER Persistence
   Specify the disk persistence mode. The valid values are:
     append
@@ -104,26 +104,36 @@ ReconfigVM_Task: http://pubs.vmware.com/vsphere-50/topic/com.vmware.wssdk.apiref
         ${RunAsync}
     )
 
+    # Attempting to create a hard disk less than 1024 KB will fail
+    if($CapacityKB -lt 1024)
+    {
+        Throw "CapacityKB must be at least 1024"
+        return
+    }
+
     $vmObj = Get-VM -Name $VM | Get-View
 
-    if($Controller -ne $null)
-    {
-        # If a Controller was specified, does it already exist?
-        $vmController = $vmObj.Config.Hardware.Device | where {$_ -is $Controller.GetType()}
-    } else {
-        # Does any SCSI controller exist in the VM?
-        $vmController = $vmObj.Config.Hardware.Device | where {$_ -is [VMware.Vim.VirtualScsiController]}
-    }
-    
+    # Does any SCSI controller exist in the VM?
+    $vmController = $vmObj.Config.Hardware.Device | ?{$_ -is [VMware.Vim.VirtualScsiController]}
+
     # Create a SCSI controller in the VM if none exists yet
     if($vmController -eq $null)
     {
+        # User specified controller?
+        if($Controller -eq $null) 
+        {
+            $controllerType = New-Object VMware.Vim.VirtualLsiLogicController
+        } else {
+            $controllerType = New-Object $Controller
+        }
+
         $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
         $spec.deviceChange = @()
         $spec.deviceChange += New-Object VMware.Vim.VirtualDeviceConfigSpec
-        $spec.deviceChange[0].device = New-Object VMware.Vim.VirtualLsiLogicController
+        $spec.deviceChange[0].device = $controllerType
         $spec.deviceChange[0].operation = "add"
-        Write-Progress -activity "Creating controller for vm $VM" -status "percent created: 0" -PercentComplete 0
+        $controllerKind = $controllerType.GetType().Name
+        Write-Progress -activity "Creating a $controllerKind controller for vm $VM" -status "percent created: 0" -PercentComplete 0
         $taskMoRef = $vmObj.ReconfigVM_Task($spec)
         $task = Get-View $taskMoRef
         while($task.Info.State -eq "running" -or $task.Info.State -eq "queued") {
@@ -137,13 +147,26 @@ ReconfigVM_Task: http://pubs.vmware.com/vsphere-50/topic/com.vmware.wssdk.apiref
         }
         # Get controller object for later use
         $vmObj = Get-VM -Name $VM | Get-View
-        $vmController = $vmObj.Config.Hardware.Device | where {$_ -is [VMware.Vim.VirtualScsiController]}
+        $vmController = $vmObj.Config.Hardware.Device | ?{$_ -is [VMware.Vim.VirtualScsiController]}
     }
 
     # Find the next Unit Number (SCSI Id)
-    $maxUnitNumber=0
-    $vmObj.config.hardware.device | where {$_.ControllerKey -eq $vmController.Key} | %{ if($maxUnitNumber -lt $_.UnitNumber) {$maxUnitNumber = $_.UnitNumber} }
-    $nextUnitNumber = $maxUnitNumber + 1
+    #  If the SCSI controller device list is null, then no hard disks are attached
+    if($vmController.Device -eq $null)
+    {
+        $nextUnitNumber=0
+    } else {
+        # For the SCSI adapter we plan to add a virtual HD to in a moment, get list of hard disks attached to it
+        $hardDisksOnScsiController = $vmController.Device
+        $scsiUnitNumbersInUse = $vmObj.Config.Hardware.Device | ?{$_ -is [VMware.Vim.VirtualDisk]} | ?{$hardDisksOnScsiController -contains $_.Key} | %{$_.UnitNumber}
+        for($i=0; $nextUnitNumber -eq $null; $i++)
+        {
+            if($scsiUnitNumbersInUse -notcontains $i)
+            {
+                $nextUnitNumber=$i
+            }
+        }
+    }
 
     # Create the hard disk
     $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
@@ -160,7 +183,7 @@ ReconfigVM_Task: http://pubs.vmware.com/vsphere-50/topic/com.vmware.wssdk.apiref
     $spec.deviceChange[0].Device.Backing.ContentId = $null
     $spec.deviceChange[0].Device.Backing.ChangeId = $null
     $spec.deviceChange[0].Device.Backing.Parent = $null
-    $spec.deviceChange[0].Device.Backing.FileName = ''
+    $spec.deviceChange[0].Device.Backing.FileName = '[' + $Datastore.Name + ']'
     $spec.deviceChange[0].Device.Backing.Datastore = $Datastore.ExtensionData.MoRef
     $spec.deviceChange[0].Device.Backing.DynamicType = $null
     $spec.deviceChange[0].Device.CapacityInKB = $CapacityKB
@@ -194,13 +217,58 @@ ReconfigVM_Task: http://pubs.vmware.com/vsphere-50/topic/com.vmware.wssdk.apiref
         }
     }
 
+    # Check for task errors
+    if($task.Info.State -eq "error")
+    {
+        $errorMessage = "There was an error executing the task to create the hard disk: {0}" -f $task.Info.Error.LocalizedMessage
+        Throw $errorMessage
+    }
     # Print the results
-    $newDisk = (Get-VM -Name $VM | Get-View).Config.Hardware.Device | where {$_.ControllerKey -eq $vmController.Key -and $_.UnitNumber -eq $nextUnitNumber}
-    $newDisk | Select-Object @{Name="CapacityKB";Expression={$_.CapacityInKB}},
-                             @{Name="Persistence";Expression={$_.Backing.DiskMode}},
-                             @{Name="EagerlyScrub";Expression={$_.Backing.EagerlyScrub}},
-                             @{Name="Filename";Expression={$_.Backing.FileName}} `
-             | Format-Table -AutoSize
-
+    $newDisk = (Get-VM -Name $VM | Get-View).Config.Hardware.Device | ?{$_.ControllerKey -eq $vmController.Key -and $_.UnitNumber -eq $nextUnitNumber}
+    $newDisk | Format-Table @{N="CapacityKB";E={$_.CapacityInKB};A="Left"},
+                            @{N="Persistence";E={$_.Backing.DiskMode};A="Left"},
+                            @{N="EagerlyScrub";E={$_.Backing.EagerlyScrub};A="Left"},
+                            @{N="Filename";E={$_.Backing.FileName};A="Right"} `
+                            -AutoSize
+    $global:newDisk = $newDisk
 }
 
+Function Get-HardDiskDetails
+{
+    param(
+        [Parameter(Mandatory=$true)]
+        [System.Array]
+        ${VM},
+
+        [Parameter(Mandatory=$true)]
+        [System.Array]
+        ${HardDisk}
+    )
+
+    if($VM -eq $null -and $HardDisk -ne $null)
+    {
+        Throw "You must specify -VM when specifying -HardDisk"
+    } 
+
+    if($VM -eq $null)
+    {
+        $vms = Get-VM -Name $VM
+    } else {
+        $vms = Get-VM
+    }
+
+    foreach($vm in $vms)
+    {
+        if($HardDisk -eq $null)
+        {
+            $hardDisks = $vm | Get-HardDisk
+        } else {
+            $hardDisks = $vm | Get-HardDisk -Name $HardDisk
+        }
+        $hardDisks | Format-Table @{N="CapacityKB";E={};A="Left"},
+                                  @{N="";E={};A=""}
+    }
+
+
+
+}
