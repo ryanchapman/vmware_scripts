@@ -1,8 +1,12 @@
-New-EagerZeroHardDisk.ps1 - Contains a PowerShell function called New-EagerZeroHardDisk which provides a way to create 
-                            a new hard disk on an ESX/ESXi server that is zeroed out at the time of creation,
-                            rather than over time.  Sometimes this is referred to as EagerlyScrub or EagerZero.
-                            Required for Fault Tolerance.  Some documents suggest that zeroing a disk up front
-                            provides for better performance.  I have not tested this theory.
+New-EagerZeroHardDisk.ps1 - Contains a PowerShell function called 
+                            New-EagerZeroHardDisk which provides a way to create
+                            a new hard disk on an ESX/ESXi server that is zeroed
+                            out at the time of creation, rather than over time.
+                            Sometimes this is referred to as EagerlyScrub or
+                            EagerZero. Required for Fault Tolerance.  Some
+                            documents suggest that zeroing a disk up front
+                            provides for better performance.  I have not tested
+                            this theory.
 
                             To install:
                             Download file to a folder (e.g. C:\temp)
